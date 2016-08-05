@@ -35,6 +35,10 @@ func BadRequest(messages ...string) Error {
 	return createMessageError(http.StatusText(http.StatusBadRequest), messages)
 }
 
+func MethodNotAllowed(messages ...string) Error {
+	return createMessageError(http.StatusText(http.StatusMethodNotAllowed), messages)
+}
+
 func createMessageError(defaultMessage string, messages []string) Error {
 	if len(messages) > 0 {
 		return CreateMessageError(messages[0])
