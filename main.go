@@ -1,14 +1,26 @@
 /*
+ROUTES
 	generate data
 		http GET http://localhost:3000/campaign x==100 y==26 z==10000 -v
-
 	import campaign data
 		http POST http://localhost:3000/import_camp
-
 	search
 		http POST http://localhost:3000/search user=u1 profile:='{"attr_A":"A5","attr_B":"B15", "attr_C":"C15", "attr_D":"D10", "attr_E":"E10"}' -v -j
+	search auto
+		http GET http://localhost:3000/search_auto
+	create user
+		http GET http://localhost:3000/user
 
+HOW TO RUN
+	*	generate data
+	*	import campaign data
+	*	run search auto
+
+@TODO
+	* 	optimise data model
+	*	optimise search implementation
 */
+
 package main
 
 import (
@@ -20,9 +32,11 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,11 +48,17 @@ const (
 	DATA_NAME = "data.json"
 	DATA_PATH = "./"
 
-	MAX_WORKER_LIMIT = 10000
+	MAX_WORKER_LIMIT = 10
 )
 
 var campaigns []Campaign
 var mutex sync.Mutex
+var counter uint64
+
+type SearchSuccessResponse struct {
+	Winner  string
+	Counter int
+}
 
 //@todo singletone
 func Rand() *rand.Rand {
@@ -130,14 +150,37 @@ func generateCampData(x, y, z int) (campaigns []Campaign) {
 	return
 }
 
-func importCampHandler(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
+func createUserHandler(w http.ResponseWriter, r *http.Request) {
+	name, oldCounter := userName()
+	user := generateUser(name, oldCounter)
+	SetJsonResp(w, http.StatusOK, user)
+}
 
+func generateUser(name string, counter uint64) (u User) {
+	u.Name = name
+	u.Profile = make(map[string]string)
+	count := counter % 26
+	for i := 0; i <= int(count); i++ {
+		char := string(CHARS[i])
+		randIndex := Rand().Intn(200)
+		key := "attr_" + char
+		value := fmt.Sprintf("%v%v", char, randIndex)
+		u.Profile[key] = value
+	}
+	return
+}
+
+func userName() (n string, c uint64) {
+	newC := atomic.AddUint64(&counter, 1)
+	runtime.Gosched()
+	c = newC - 1
+	n = "u" + fmt.Sprintf("%v", c)
+	return
+}
+
+func importCampHandler(w http.ResponseWriter, r *http.Request) {
 	status, msg := importCamp()
 	SetJsonResp(w, status, msg)
-
-	secs := time.Since(start).Seconds()
-	log.Printf("%.2fs", secs)
 }
 
 func importCamp() (status int, msg interface{}) {
@@ -155,6 +198,40 @@ func importCamp() (status int, msg interface{}) {
 		msg = res.InternalServerError(err.Error())
 		return
 	}
+	return
+}
+
+func searchAutoHandler(w http.ResponseWriter, r *http.Request) {
+
+	id := Rand().Intn(1000) //todo
+
+	s1 := time.Now()
+
+	s4 := time.Now()
+	if len(campaigns) == 0 {
+		SetJsonResp(w, http.StatusBadRequest, res.BadRequest("Please, generate and import data"))
+		return
+	}
+
+	name, oldCounter := userName()
+	log.Printf("CREATE USER NAME[%v] %.2fs", id, time.Since(s4).Seconds())
+
+	s2 := time.Now()
+	u := generateUser(name, oldCounter)
+	log.Printf("GENERATE USER[%v] %.2fs", id, time.Since(s2).Seconds())
+
+	s3 := time.Now()
+	winnerName := search(&u, &campaigns)
+	log.Printf("SEARCH[%v] %.2fs", id, time.Since(s3).Seconds())
+
+	if utils.IsEmptyStr(winnerName) {
+		SetJsonResp(w, http.StatusOK, res.Ok())
+		return
+	}
+
+	SetJsonResp(w, http.StatusOK, SearchSuccessResponse{Winner: winnerName, Counter: int(atomic.LoadUint64(&counter))})
+
+	log.Printf("TOTAL[%v] %.2fs", id, time.Since(s1).Seconds())
 	return
 }
 
@@ -195,20 +272,17 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := search(&u, &campaigns)
+	winnerName := search(&u, &campaigns)
 
 	secs := time.Since(start).Seconds()
 	log.Printf("%.2fs", secs)
 
-	if utils.IsEmptyStr(name) {
+	if utils.IsEmptyStr(winnerName) {
 		SetJsonResp(w, http.StatusOK, res.Ok())
 		return
 	}
 
-	SetJsonResp(w, http.StatusOK, struct {
-		Winner string
-		Counter int
-	}{Winner:name})
+	SetJsonResp(w, http.StatusOK, SearchSuccessResponse{Winner: winnerName, Counter: int(atomic.LoadUint64(&counter))})
 	return
 }
 
@@ -260,7 +334,7 @@ A:
 
 		//the user’s profile attribute value can be found in the list of the campaign target attri_list.
 	B:
-		for _, ct := range campaign.TargetList { // B
+		for _, ct := range campaign.TargetList {
 			attrValue := u.Profile[ct.Target]
 			for _, a := range ct.AttrList {
 				if attrValue == a {
@@ -283,6 +357,8 @@ func main() {
 	http.HandleFunc("/campaign", generateCampDataHandler)
 	http.HandleFunc("/import_camp", importCampHandler)
 	http.HandleFunc("/search", searchHandler)
+	http.HandleFunc("/user", createUserHandler)
+	http.HandleFunc("/search_auto", searchAutoHandler)
 
 	port := fmt.Sprintf(":%v", PORT)
 
